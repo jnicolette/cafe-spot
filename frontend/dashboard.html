@@ -117,6 +117,11 @@
     <script src="js/ui.js"></script>
     <script src="js/app.js"></script>
     <script>
+        // Allow guest access
+        const isGuest = sessionStorage.getItem('cafespot_guest') === 'true';
+        if (!isGuest && !Auth.isLoggedIn()) {
+            window.location.href = '/index.html';
+        }
         document.getElementById('favOverlay').addEventListener('click', () => {
             document.getElementById('favPanel').classList.remove('open');
         });
