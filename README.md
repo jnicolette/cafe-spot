@@ -46,7 +46,7 @@ cafespot/
 # 2. Run:
 docker compose up -d --build
 
-# Frontend: http://localhost:8081
+# Frontend: http://localhost:8082
 # Backend:  http://localhost:5000
 # Health:   http://localhost:5000/api/health
 ```
