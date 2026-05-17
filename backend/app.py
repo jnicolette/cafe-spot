@@ -9,6 +9,7 @@ import requests
 import time
 from datetime import timedelta
 from flask import Flask, request, jsonify, Response, g
+from limiter import limiter
 from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
@@ -16,6 +17,7 @@ from flask_jwt_extended import (
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+limiter.init_app(app)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 app.config['JWT_SECRET_KEY'] = os.environ.get('SECRET_KEY', 'cafespot-dev-secret-change-in-prod')
@@ -77,7 +79,9 @@ def init_db():
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
+
 @app.route('/api/auth/register', methods=['POST'])
+@limiter.limit("10 per minute")
 def register():
     data     = request.get_json() or {}
     username = data.get('username', '').strip()
@@ -111,6 +115,7 @@ def register():
 
 
 @app.route('/api/auth/login', methods=['POST'])
+@limiter.limit("10 per minute")
 def login():
     data     = request.get_json() or {}
     email    = data.get('email', '').strip().lower()
