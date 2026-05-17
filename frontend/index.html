@@ -36,6 +36,12 @@
                 </div>
                 <div class="form-error" id="loginError"></div>
                 <button type="submit" class="btn-auth" id="loginBtn">Sign In</button>
+                <div class="guest-divider">
+                    <span>or</span>
+                </div>
+                <button type="button" class="btn-guest" id="guestBtn">
+                    Continue as Guest
+                </button>
             </form>
 
             <!-- Register Form -->
@@ -137,6 +143,11 @@
                 btn.disabled = false;
                 btn.textContent = 'Create Account';
             }
+        });
+        // Guest button
+        document.getElementById('guestBtn').addEventListener('click', () => {
+            sessionStorage.setItem('cafespot_guest', 'true');
+            window.location.href = '/dashboard.html';
         });
     </script>
 </body>
