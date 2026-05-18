@@ -79,7 +79,6 @@ def init_db():
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
-
 @app.route('/api/auth/register', methods=['POST'])
 @limiter.limit("10 per minute")
 def register():

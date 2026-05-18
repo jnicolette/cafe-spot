@@ -10,7 +10,7 @@ Find the best cafes in Sydney within 5km of any suburb, sorted closest to farthe
 - **Google Maps** — Interactive map with numbered markers matching each result.
 - **Filters** — Filter by Open Now, minimum rating, and price level.
 - **Cafe details** — Photos, opening hours, phone, website, reviews, Street View.
-- **Favourites** — Save and manage favourite cafes per user account.
+- **Favourites** — Save cafes with the ❤️ button; view them via the dropdown in the header.
 - **Fully Dockerised** — Backend + frontend in separate containers via docker-compose.
 - **CI/CD** — Jenkins pipeline with lint, dependency install, Docker build, health check, and deploy stages.
 
@@ -20,18 +20,20 @@ Find the best cafes in Sydney within 5km of any suburb, sorted closest to farthe
 cafespot/
 ├── backend/
 │   ├── app.py              Flask API + JWT auth
+│   ├── limiter.py          Rate limiting
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── frontend/
 │   ├── index.html          Login / register page
 │   ├── dashboard.html      Main app
-│   ├── css/style.css
+│   ├── css/
+│   │   └── style.css       All styles incl. favourites dropdown
 │   ├── js/
 │   │   ├── config.js       API base URL + Google Maps key
 │   │   ├── auth.js         JWT login / register / logout
 │   │   ├── api.js          All backend calls
 │   │   ├── ui.js           DOM rendering helpers
-│   │   └── app.js          Application logic + Google Maps
+│   │   └── app.js          Application logic + Google Maps + favourites dropdown
 │   ├── nginx.conf          Proxies /api/* to backend container
 │   └── Dockerfile
 ├── docker-compose.yml
@@ -50,6 +52,12 @@ docker compose up -d --build
 # Backend:  http://localhost:5000
 # Health:   http://localhost:5000/api/health
 ```
+
+## Favourites dropdown
+
+Click the **❤️ Favourites** button in the top-right header to open a compact dropdown showing all saved cafes. Each item shows the cafe name, address, and rating. Click **✕** next to any item to remove it from your favourites instantly.
+
+The ❤️ button on each cafe card still works as before — it adds/removes the cafe and updates both the card icon and the dropdown count badge.
 
 ## Jenkins CI/CD setup
 

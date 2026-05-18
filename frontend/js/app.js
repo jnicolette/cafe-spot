@@ -1,297 +1,448 @@
-let map, markers = [], infoWindow;
-let currentCafes = [], favoriteIds = new Set();
-let originLat, originLng;
+/* app.js — Application logic + Google Maps */
 
-document.addEventListener('DOMContentLoaded', async () => {
-    if (!Auth.requireAuth()) return;
+let map;
+let markers       = [];
+let infoWindows   = [];
+let allCafes      = [];
+let favorites     = new Set();   // set of place_ids
+let favoritesData = [];          // full favourite objects from API
 
-    const user = Auth.getUser();
-    document.getElementById('userName').textContent = user?.username || 'User';
-    document.getElementById('logoutBtn').addEventListener('click', Auth.logout);
-
-    await loadFavorites();
-    initAutocomplete();
-    initFilters();
-
-    document.getElementById('searchForm').addEventListener('submit', handleSearch);
-    document.getElementById('favToggle').addEventListener('click', toggleFavPanel);
-    document.getElementById('closeFavPanel').addEventListener('click', toggleFavPanel);
-});
-
+// ── Initialise Map ────────────────────────────────────────────────────────────
 function initMap() {
     map = new google.maps.Map(document.getElementById('map'), {
-        center: CONFIG.MAP_CENTER,
-        zoom: CONFIG.MAP_ZOOM,
-        styles: mapStyles(),
+        center: { lat: -33.8688, lng: 151.2093 },
+        zoom: 12,
         mapTypeControl: false,
+        fullscreenControl: false,
         streetViewControl: false,
     });
-    infoWindow = new google.maps.InfoWindow();
 }
 
-function initAutocomplete() {
-    const input    = document.getElementById('suburbInput');
-    const dropdown = document.getElementById('autocompleteDropdown');
-    let debounceTimer;
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
+    const isGuest = sessionStorage.getItem('cafespot_guest') === 'true';
 
-    input.addEventListener('input', () => {
-        clearTimeout(debounceTimer);
-        const val = input.value.trim();
-        if (val.length < 2) { dropdown.innerHTML = ''; dropdown.hidden = true; return; }
+    // Set username in header
+    const nameEl = document.getElementById('userName');
+    if (nameEl) nameEl.textContent = isGuest ? 'Guest' : (Auth.getUsername() || '');
 
-        debounceTimer = setTimeout(async () => {
-            try {
-                const data = await API.autocomplete(val);
-                dropdown.innerHTML = '';
-                (data.predictions || []).slice(0, 6).forEach(p => {
-                    const li = document.createElement('li');
-                    const suburb = p.description.replace(/, .*/, '');
-                    li.textContent = p.description;
-                    li.addEventListener('click', () => {
-                        input.value = suburb;
-                        dropdown.hidden = true;
-                    });
-                    dropdown.appendChild(li);
-                });
-                dropdown.hidden = dropdown.children.length === 0;
-            } catch {}
-        }, 300);
-    });
+    // Load favourites for logged-in users
+    if (!isGuest && Auth.isLoggedIn()) {
+        await loadFavorites();
+    }
 
-    document.addEventListener('click', e => {
-        if (!e.target.closest('.search-box')) { dropdown.hidden = true; }
-    });
-}
+    // Logout
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (logoutBtn) logoutBtn.addEventListener('click', Auth.logout);
 
-function initFilters() {
+    // Search form
+    const searchForm = document.getElementById('searchForm');
+    if (searchForm) searchForm.addEventListener('submit', handleSearch);
+
+    // Autocomplete
+    const suburbInput = document.getElementById('suburbInput');
+    if (suburbInput) {
+        let acTimer;
+        suburbInput.addEventListener('input', () => {
+            clearTimeout(acTimer);
+            const val = suburbInput.value.trim();
+            if (val.length < 2) { hideAutocomplete(); return; }
+            acTimer = setTimeout(() => fetchAutocomplete(val), 300);
+        });
+        suburbInput.addEventListener('keydown', e => {
+            if (e.key === 'Escape') hideAutocomplete();
+        });
+        document.addEventListener('click', e => {
+            if (!e.target.closest('.search-box')) hideAutocomplete();
+        });
+    }
+
+    // Filters — re-render on change
     ['filterOpen', 'filterRating', 'filterPrice'].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.addEventListener('change', applyFilters);
+        if (el) el.addEventListener('change', renderFilteredCafes);
+    });
+
+    // Favourites dropdown toggle
+    setupFavDropdown();
+});
+
+// ── Favourites Dropdown ───────────────────────────────────────────────────────
+function setupFavDropdown() {
+    const btn      = document.getElementById('favToggle');
+    const dropdown = document.getElementById('favDropdown');
+    if (!btn || !dropdown) return;
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isOpen = dropdown.classList.contains('open');
+        if (isOpen) {
+            closeFavDropdown();
+        } else {
+            openFavDropdown();
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.fav-dropdown-wrapper')) {
+            closeFavDropdown();
+        }
     });
 }
 
-async function handleSearch(e) {
-    e.preventDefault();
-    const suburb = document.getElementById('suburbInput').value.trim();
-    if (!suburb) return;
+function openFavDropdown() {
+    const dropdown = document.getElementById('favDropdown');
+    if (!dropdown) return;
+    renderFavDropdownList();
+    dropdown.classList.add('open');
+}
 
-    const btn = document.getElementById('searchBtn');
-    UI.setLoading(btn, true);
-    document.getElementById('resultsGrid').innerHTML = '';
-    document.getElementById('resultsCount').textContent = '';
+function closeFavDropdown() {
+    const dropdown = document.getElementById('favDropdown');
+    if (dropdown) dropdown.classList.remove('open');
+}
 
+function renderFavDropdownList() {
+    const list = document.getElementById('favDropdownList');
+    if (!list) return;
+
+    if (sessionStorage.getItem('cafespot_guest') === 'true') {
+        list.innerHTML = '<p class="fav-dd-empty">Sign in to save favourites.</p>';
+        return;
+    }
+
+    if (favoritesData.length === 0) {
+        list.innerHTML = '<p class="fav-dd-empty">No saved cafes yet.<br>Tap ❤️ on a cafe to save it.</p>';
+        return;
+    }
+
+    list.innerHTML = favoritesData.map(fav => `
+        <div class="fav-dd-item" data-place-id="${fav.place_id}">
+            <div class="fav-dd-info">
+                <span class="fav-dd-name">${fav.name || 'Unknown'}</span>
+                <span class="fav-dd-addr">${fav.vicinity || ''}</span>
+                ${fav.rating ? `<span class="fav-dd-rating">★ ${fav.rating}</span>` : ''}
+            </div>
+            <button class="fav-dd-remove" data-place-id="${fav.place_id}" title="Remove">✕</button>
+        </div>
+    `).join('');
+
+    list.querySelectorAll('.fav-dd-remove').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const pid = btn.dataset.placeId;
+            await toggleFavorite(pid, null);
+        });
+    });
+}
+
+// ── Load Favourites from API ──────────────────────────────────────────────────
+async function loadFavorites() {
     try {
-        const geo = await API.geocode(suburb);
-        if (!geo.valid) { UI.showToast(geo.error, 'error'); return; }
-
-        originLat = geo.lat;
-        originLng = geo.lng;
-
-        map.setCenter({ lat: originLat, lng: originLng });
-        map.setZoom(14);
-        addOriginMarker(originLat, originLng, geo.formatted_address);
-
-        const cafeData = await API.searchCafes(originLat, originLng, CONFIG.DEFAULT_RADIUS);
-        if (!cafeData.cafes?.length) { UI.showToast('No cafes found in this area.', 'info'); return; }
-
-        const placeIds = cafeData.cafes.map(c => c.place_id);
-        const distData = await API.getDistances(originLat, originLng, placeIds);
-        const distMap  = {};
-        distData.distances.forEach(d => distMap[d.place_id] = d);
-
-        currentCafes = cafeData.cafes.map(c => ({ ...c, ...distMap[c.place_id] }));
-        currentCafes.sort((a, b) => (a.distance_value || 999999) - (b.distance_value || 999999));
-
-        applyFilters();
-        plotMarkers(currentCafes);
-
-    } catch (err) {
-        UI.showToast(err.message, 'error');
-    } finally {
-        UI.setLoading(btn, false, 'Find Cafes');
+        const data    = await API.getFavorites();
+        favoritesData = data.favorites || [];
+        favorites     = new Set(favoritesData.map(f => f.place_id));
+        updateFavCount();
+    } catch (e) {
+        console.error('Could not load favourites', e);
     }
 }
 
-function applyFilters() {
-    const onlyOpen    = document.getElementById('filterOpen')?.checked;
-    const minRating   = parseFloat(document.getElementById('filterRating')?.value || '0');
-    const maxPrice    = parseInt(document.getElementById('filterPrice')?.value || '4');
+function updateFavCount() {
+    const badge = document.getElementById('favCount');
+    if (badge) badge.textContent = favorites.size > 0 ? favorites.size : '';
+}
 
-    let filtered = currentCafes.filter(c => {
-        if (onlyOpen && c.open_now !== true) return false;
-        if (c.rating && c.rating < minRating) return false;
-        if (c.price_level != null && c.price_level > maxPrice) return false;
+// ── Toggle Favourite ──────────────────────────────────────────────────────────
+async function toggleFavorite(place_id, cafeData) {
+    const isGuest = sessionStorage.getItem('cafespot_guest') === 'true';
+    if (isGuest || !Auth.isLoggedIn()) {
+        UI.toast('Sign in to save favourites', 'info');
+        return;
+    }
+
+    try {
+        if (favorites.has(place_id)) {
+            await API.removeFavorite(place_id);
+            favorites.delete(place_id);
+            favoritesData = favoritesData.filter(f => f.place_id !== place_id);
+            UI.toast('Removed from favourites', 'info');
+        } else {
+            if (!cafeData) {
+                cafeData = allCafes.find(c => c.place_id === place_id) || { place_id };
+            }
+            await API.addFavorite(cafeData);
+            favorites.add(place_id);
+            favoritesData.unshift(cafeData);
+            UI.toast('Added to favourites ❤️', 'success');
+        }
+        updateFavCount();
+        updateFavButtonsInGrid(place_id);
+        // If dropdown is open, re-render it
+        if (document.getElementById('favDropdown')?.classList.contains('open')) {
+            renderFavDropdownList();
+        }
+    } catch (err) {
+        UI.toast('Something went wrong', 'error');
+    }
+}
+
+function updateFavButtonsInGrid(place_id) {
+    document.querySelectorAll(`.fav-btn[data-place-id="${place_id}"]`).forEach(btn => {
+        btn.textContent = favorites.has(place_id) ? '❤️' : '🤍';
+        btn.title = favorites.has(place_id) ? 'Remove from favourites' : 'Add to favourites';
+    });
+}
+
+// ── Autocomplete ──────────────────────────────────────────────────────────────
+async function fetchAutocomplete(input) {
+    try {
+        const data        = await API.autocomplete(input);
+        const predictions = data.predictions || [];
+        const dropdown    = document.getElementById('autocompleteDropdown');
+        if (!dropdown) return;
+
+        if (predictions.length === 0) { hideAutocomplete(); return; }
+
+        dropdown.innerHTML = '';
+        predictions.forEach(p => {
+            const li = document.createElement('li');
+            li.textContent = p.description;
+            li.addEventListener('click', () => {
+                document.getElementById('suburbInput').value = p.description;
+                hideAutocomplete();
+                document.getElementById('searchForm').requestSubmit();
+            });
+            dropdown.appendChild(li);
+        });
+        dropdown.hidden = false;
+    } catch (e) { hideAutocomplete(); }
+}
+
+function hideAutocomplete() {
+    const dropdown = document.getElementById('autocompleteDropdown');
+    if (dropdown) dropdown.hidden = true;
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+async function handleSearch(e) {
+    e.preventDefault();
+    const input   = document.getElementById('suburbInput').value.trim();
+    const searchBtn = document.getElementById('searchBtn');
+    if (!input) return;
+    hideAutocomplete();
+
+    searchBtn.disabled = true;
+    searchBtn.innerHTML = '<span class="spinner"></span> Searching...';
+    setResultsCount('');
+    clearMarkers();
+
+    try {
+        const geo = await API.geocode(input);
+        if (!geo.valid) {
+            UI.toast(geo.error || 'Suburb not found', 'error');
+            return;
+        }
+
+        if (map) map.setCenter({ lat: geo.lat, lng: geo.lng });
+
+        const cafesData = await API.searchCafes(geo.lat, geo.lng);
+        let cafes       = cafesData.cafes || [];
+
+        if (cafes.length === 0) {
+            setResultsCount('No cafes found nearby.');
+            document.getElementById('resultsGrid').innerHTML =
+                '<div class="empty-state"><div class="empty-icon">☕</div><p>No cafes found in this area.</p></div>';
+            return;
+        }
+
+        // Get distances
+        const place_ids   = cafes.map(c => c.place_id);
+        const distData    = await API.getDistances(geo.lat, geo.lng, place_ids);
+        const distMap     = {};
+        (distData.distances || []).forEach(d => { distMap[d.place_id] = d; });
+
+        cafes = cafes.map(c => ({
+            ...c,
+            distance_text:  distMap[c.place_id]?.distance_text  || null,
+            duration_text:  distMap[c.place_id]?.duration_text  || null,
+            distance_value: distMap[c.place_id]?.distance_value ?? 999999,
+        }));
+
+        cafes.sort((a, b) => a.distance_value - b.distance_value);
+        allCafes = cafes;
+
+        renderFilteredCafes();
+        placeMarkers(cafes);
+    } catch (err) {
+        UI.toast('Search failed. Please try again.', 'error');
+    } finally {
+        searchBtn.disabled = false;
+        searchBtn.innerHTML = 'Find Cafes';
+    }
+}
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+function renderFilteredCafes() {
+    const openOnly  = document.getElementById('filterOpen')?.checked;
+    const minRating = parseFloat(document.getElementById('filterRating')?.value || '0');
+    const maxPrice  = parseInt(document.getElementById('filterPrice')?.value || '4', 10);
+
+    let cafes = allCafes.filter(c => {
+        if (openOnly  && c.open_now !== true) return false;
+        if (c.rating  && c.rating < minRating) return false;
+        if (c.price_level != null && c.price_level > maxPrice - 1) return false;
         return true;
     });
 
-    renderCafes(filtered);
+    setResultsCount(cafes.length > 0 ? `${cafes.length} cafe${cafes.length !== 1 ? 's' : ''} found` : 'No cafes match filters');
+    renderCafes(cafes);
 }
 
+function setResultsCount(text) {
+    const el = document.getElementById('resultsCount');
+    if (el) el.textContent = text;
+}
+
+// ── Render Cafes ──────────────────────────────────────────────────────────────
 function renderCafes(cafes) {
-    const grid  = document.getElementById('resultsGrid');
-    const count = document.getElementById('resultsCount');
+    const grid = document.getElementById('resultsGrid');
+    if (!grid) return;
+    grid.innerHTML = '';
 
-    count.textContent = `${cafes.length} cafe${cafes.length !== 1 ? 's' : ''} found`;
-    grid.innerHTML    = cafes.map((c, i) => UI.renderCafeCard(c, favoriteIds.has(c.place_id), i + 1)).join('');
-
-    grid.querySelectorAll('.cafe-card').forEach(card => {
-        card.addEventListener('click', e => {
-            if (e.target.closest('.fav-btn') || e.target.closest('.btn-details')) return;
-            const placeId = card.dataset.placeId;
-            const cafe    = currentCafes.find(c => c.place_id === placeId);
-            if (cafe) panToMarker(cafe);
-        });
-    });
-
-    grid.querySelectorAll('.fav-btn').forEach(btn => {
-        btn.addEventListener('click', e => {
-            e.stopPropagation();
-            toggleFavorite(btn.dataset.placeId);
-        });
-    });
-
-    grid.querySelectorAll('.btn-details').forEach(btn => {
-        btn.addEventListener('click', e => {
-            e.stopPropagation();
-            const cafe = currentCafes.find(c => c.place_id === btn.dataset.placeId);
-            if (cafe) openDetailModal(cafe);
-        });
-    });
-}
-
-function plotMarkers(cafes) {
-    markers.forEach(m => m.setMap(null));
-    markers = [];
+    if (cafes.length === 0) {
+        grid.innerHTML = '<div class="empty-state"><div class="empty-icon">☕</div><p>No cafes match your filters.</p></div>';
+        return;
+    }
 
     cafes.forEach((cafe, i) => {
+        const isFav = favorites.has(cafe.place_id);
+        const card  = UI.renderCafeCard(cafe, i + 1, isFav);
+
+        card.querySelector('.fav-btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleFavorite(cafe.place_id, cafe);
+        });
+
+        card.querySelector('.btn-details').addEventListener('click', (e) => {
+            e.stopPropagation();
+            openDetailModal(cafe.place_id);
+        });
+
+        card.addEventListener('click', () => {
+            if (map && cafe.lat && cafe.lng) {
+                map.setCenter({ lat: cafe.lat, lng: cafe.lng });
+                map.setZoom(16);
+                const markerIdx = allCafes.indexOf(cafe);
+                if (infoWindows[markerIdx]) {
+                    infoWindows.forEach(iw => iw.close());
+                    infoWindows[markerIdx].open(map, markers[markerIdx]);
+                }
+            }
+        });
+
+        grid.appendChild(card);
+    });
+}
+
+// ── Map Markers ───────────────────────────────────────────────────────────────
+function placeMarkers(cafes) {
+    clearMarkers();
+    cafes.forEach((cafe, i) => {
+        if (!cafe.lat || !cafe.lng) return;
+
         const marker = new google.maps.Marker({
             position: { lat: cafe.lat, lng: cafe.lng },
             map,
-            title: cafe.name,
-            label: { text: String(i + 1), color: '#fff', fontSize: '12px', fontWeight: 'bold' },
+            label: { text: String(i + 1), color: '#fff', fontWeight: 'bold', fontSize: '12px' },
             icon: {
                 path: google.maps.SymbolPath.CIRCLE,
+                scale: 16,
                 fillColor: '#b5743a',
                 fillOpacity: 1,
                 strokeColor: '#fff',
                 strokeWeight: 2,
-                scale: 16,
             },
+            title: cafe.name,
+        });
+
+        const iw = new google.maps.InfoWindow({
+            content: `<strong>${cafe.name}</strong><br>${cafe.vicinity || ''}`
+                   + (cafe.rating ? `<br>★ ${cafe.rating}` : ''),
         });
 
         marker.addListener('click', () => {
-            infoWindow.setContent(`
-                <div style="font-family:sans-serif;max-width:200px">
-                    <strong>${cafe.name}</strong><br>
-                    <small>${cafe.vicinity || ''}</small><br>
-                    ${cafe.rating ? `★ ${cafe.rating}` : ''}
-                    ${cafe.distance_text ? ` · ${cafe.distance_text}` : ''}
-                </div>`);
-            infoWindow.open(map, marker);
-
-            const card = document.querySelector(`.cafe-card[data-place-id="${cafe.place_id}"]`);
-            if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            infoWindows.forEach(w => w.close());
+            iw.open(map, marker);
         });
 
         markers.push(marker);
+        infoWindows.push(iw);
     });
 }
 
-function addOriginMarker(lat, lng, label) {
-    new google.maps.Marker({
-        position: { lat, lng },
-        map,
-        title: label,
-        icon: {
-            path: google.maps.SymbolPath.CIRCLE,
-            fillColor: '#2563eb',
-            fillOpacity: 1,
-            strokeColor: '#fff',
-            strokeWeight: 3,
-            scale: 10,
-        },
-        zIndex: 999,
-    });
+function clearMarkers() {
+    markers.forEach(m => m.setMap(null));
+    markers      = [];
+    infoWindows  = [];
 }
 
-function panToMarker(cafe) {
-    map.panTo({ lat: cafe.lat, lng: cafe.lng });
-    map.setZoom(16);
-    const marker = markers.find(m => m.getTitle() === cafe.name);
-    if (marker) google.maps.event.trigger(marker, 'click');
-}
-
-async function toggleFavorite(placeId) {
-    const cafe = currentCafes.find(c => c.place_id === placeId);
-    if (!cafe) return;
+// ── Detail Modal ──────────────────────────────────────────────────────────────
+async function openDetailModal(place_id) {
+    const container = document.getElementById('modalContainer');
+    container.hidden = false;
+    container.innerHTML = '<div class="modal-overlay"><div class="modal-box"><div class="modal-loading">Loading...</div></div></div>';
 
     try {
-        if (favoriteIds.has(placeId)) {
-            await API.removeFavorite(placeId);
-            favoriteIds.delete(placeId);
-            UI.showToast('Removed from favourites', 'info');
+        const details = await API.getDetails(place_id);
+        const isFav   = favorites.has(place_id);
+        const cafe    = allCafes.find(c => c.place_id === place_id);
+
+        container.innerHTML = UI.renderDetailModal(details, place_id, isFav);
+
+        // Street View
+        if (details.geometry?.location) {
+            const { lat, lng } = details.geometry.location;
+            const svArea = document.getElementById('streetviewArea');
+            const svImg  = new Image();
+            svImg.className = 'streetview-img';
+            svImg.src = `${CONFIG.API_BASE}/api/streetview?lat=${lat}&lng=${lng}&width=600&height=200`;
+            svImg.onload  = () => { if (svArea) svArea.innerHTML = ''; svArea.appendChild(svImg); };
+            svImg.onerror = () => { if (svArea) svArea.style.display = 'none'; };
         } else {
-            await API.addFavorite({ place_id: placeId, name: cafe.name, vicinity: cafe.vicinity, rating: cafe.rating, lat: cafe.lat, lng: cafe.lng });
-            favoriteIds.add(placeId);
-            UI.showToast(`${cafe.name} saved!`, 'success');
+            const svArea = document.getElementById('streetviewArea');
+            if (svArea) svArea.style.display = 'none';
         }
-        await loadFavorites();
-        applyFilters();
-    } catch (err) {
-        UI.showToast(err.message, 'error');
-    }
-}
 
-async function loadFavorites() {
-    try {
-        const data = await API.getFavorites();
-        favoriteIds = new Set((data.favorites || []).map(f => f.place_id));
-        renderFavList(data.favorites || []);
-    } catch {}
-}
-
-function renderFavList(favs) {
-    const list = document.getElementById('favList');
-    const count = document.getElementById('favCount');
-    count.textContent = favs.length || '';
-    if (!favs.length) {
-        list.innerHTML = '<p class="fav-empty">No saved cafes yet.</p>';
-        return;
-    }
-    list.innerHTML = favs.map(f => UI.renderFavoriteItem(f)).join('');
-    list.querySelectorAll('.fav-remove').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            await API.removeFavorite(btn.dataset.placeId);
-            favoriteIds.delete(btn.dataset.placeId);
-            await loadFavorites();
-            applyFilters();
+        // Close modal
+        document.getElementById('modalClose').addEventListener('click', closeModal);
+        container.querySelector('.modal-overlay').addEventListener('click', e => {
+            if (e.target === e.currentTarget) closeModal();
         });
-    });
-}
+        document.addEventListener('keydown', escClose);
 
-function toggleFavPanel() {
-    document.getElementById('favPanel').classList.toggle('open');
-}
-
-async function openDetailModal(cafe) {
-    const overlay = document.getElementById('modalContainer');
-    overlay.innerHTML = '<div class="modal-overlay"><div class="modal-box modal-loading">Loading details...</div></div>';
-    overlay.hidden = false;
-    try {
-        const detail = await API.getDetails(cafe.place_id);
-        overlay.innerHTML = UI.renderDetailModal(detail, cafe);
-        document.getElementById('closeModal').addEventListener('click', () => { overlay.hidden = true; overlay.innerHTML = ''; });
-        overlay.addEventListener('click', e => { if (e.target === overlay.querySelector('.modal-overlay')) { overlay.hidden = true; overlay.innerHTML = ''; } });
+        // Fav button in modal
+        const favBtnModal = container.querySelector('.fav-btn-modal');
+        if (favBtnModal) {
+            favBtnModal.addEventListener('click', async () => {
+                await toggleFavorite(place_id, cafe);
+                favBtnModal.textContent = favorites.has(place_id) ? '❤️ Remove Favourite' : '🤍 Add to Favourites';
+            });
+        }
     } catch (err) {
-        overlay.innerHTML = '';
-        overlay.hidden = true;
-        UI.showToast('Could not load details', 'error');
+        container.innerHTML = '';
+        container.hidden = true;
+        UI.toast('Could not load cafe details', 'error');
     }
 }
 
-function mapStyles() {
-    return [
-        { featureType: 'poi.business', elementType: 'labels', stylers: [{ visibility: 'off' }] },
-        { featureType: 'transit', elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
-    ];
+function closeModal() {
+    const container = document.getElementById('modalContainer');
+    container.innerHTML = '';
+    container.hidden = true;
+    document.removeEventListener('keydown', escClose);
+}
+
+function escClose(e) {
+    if (e.key === 'Escape') closeModal();
 }
