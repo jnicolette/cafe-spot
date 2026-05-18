@@ -127,6 +127,18 @@ function renderFavDropdownList() {
         </div>
     `).join('');
 
+    // Click on the item row → close dropdown and open detail modal
+    list.querySelectorAll('.fav-dd-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            // Don't trigger if the remove button was clicked
+            if (e.target.closest('.fav-dd-remove')) return;
+            const pid = item.dataset.placeId;
+            closeFavDropdown();
+            openDetailModal(pid);
+        });
+    });
+
+    // Click on remove button → remove from favourites
     list.querySelectorAll('.fav-dd-remove').forEach(btn => {
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -396,7 +408,11 @@ async function openDetailModal(place_id) {
     try {
         const details = await API.getDetails(place_id);
         const isFav   = favorites.has(place_id);
-        const cafe    = allCafes.find(c => c.place_id === place_id);
+
+        // Look up cafe in search results first, then fall back to favourites data
+        const cafe = allCafes.find(c => c.place_id === place_id)
+                  || favoritesData.find(f => f.place_id === place_id)
+                  || null;
 
         container.innerHTML = UI.renderDetailModal(details, place_id, isFav);
 
@@ -407,7 +423,7 @@ async function openDetailModal(place_id) {
             const svImg  = new Image();
             svImg.className = 'streetview-img';
             svImg.src = `${CONFIG.API_BASE}/api/streetview?lat=${lat}&lng=${lng}&width=600&height=200`;
-            svImg.onload  = () => { if (svArea) svArea.innerHTML = ''; svArea.appendChild(svImg); };
+            svImg.onload  = () => { if (svArea) { svArea.innerHTML = ''; svArea.appendChild(svImg); } };
             svImg.onerror = () => { if (svArea) svArea.style.display = 'none'; };
         } else {
             const svArea = document.getElementById('streetviewArea');
