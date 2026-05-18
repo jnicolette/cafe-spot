@@ -1,464 +1,297 @@
-/* app.js — Application logic + Google Maps */
+let map, markers = [], infoWindow;
+let currentCafes = [], favoriteIds = new Set();
+let originLat, originLng;
 
-let map;
-let markers       = [];
-let infoWindows   = [];
-let allCafes      = [];
-let favorites     = new Set();   // set of place_ids
-let favoritesData = [];          // full favourite objects from API
-
-// ── Initialise Map ────────────────────────────────────────────────────────────
-function initMap() {
-    map = new google.maps.Map(document.getElementById('map'), {
-        center: { lat: -33.8688, lng: 151.2093 },
-        zoom: 12,
-        mapTypeControl: false,
-        fullscreenControl: false,
-        streetViewControl: false,
-    });
-}
-
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-    const isGuest = sessionStorage.getItem('cafespot_guest') === 'true';
+    if (!Auth.requireAuth()) return;
 
-    // Set username in header
-    const nameEl = document.getElementById('userName');
-    if (nameEl) nameEl.textContent = isGuest ? 'Guest' : (Auth.getUsername() || '');
+    const user = Auth.getUser();
+    document.getElementById('userName').textContent = user?.username || 'User';
+    document.getElementById('logoutBtn').addEventListener('click', Auth.logout);
 
-    // Load favourites for logged-in users
-    if (!isGuest && Auth.isLoggedIn()) {
-        await loadFavorites();
-    }
+    await loadFavorites();
+    initAutocomplete();
+    initFilters();
 
-    // Logout
-    const logoutBtn = document.getElementById('logoutBtn');
-    if (logoutBtn) logoutBtn.addEventListener('click', Auth.logout);
-
-    // Search form
-    const searchForm = document.getElementById('searchForm');
-    if (searchForm) searchForm.addEventListener('submit', handleSearch);
-
-    // Autocomplete
-    const suburbInput = document.getElementById('suburbInput');
-    if (suburbInput) {
-        let acTimer;
-        suburbInput.addEventListener('input', () => {
-            clearTimeout(acTimer);
-            const val = suburbInput.value.trim();
-            if (val.length < 2) { hideAutocomplete(); return; }
-            acTimer = setTimeout(() => fetchAutocomplete(val), 300);
-        });
-        suburbInput.addEventListener('keydown', e => {
-            if (e.key === 'Escape') hideAutocomplete();
-        });
-        document.addEventListener('click', e => {
-            if (!e.target.closest('.search-box')) hideAutocomplete();
-        });
-    }
-
-    // Filters — re-render on change
-    ['filterOpen', 'filterRating', 'filterPrice'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.addEventListener('change', renderFilteredCafes);
-    });
-
-    // Favourites dropdown toggle
-    setupFavDropdown();
+    document.getElementById('searchForm').addEventListener('submit', handleSearch);
+    document.getElementById('favToggle').addEventListener('click', toggleFavPanel);
+    document.getElementById('closeFavPanel').addEventListener('click', toggleFavPanel);
 });
 
-// ── Favourites Dropdown ───────────────────────────────────────────────────────
-function setupFavDropdown() {
-    const btn      = document.getElementById('favToggle');
-    const dropdown = document.getElementById('favDropdown');
-    if (!btn || !dropdown) return;
-
-    btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const isOpen = dropdown.classList.contains('open');
-        if (isOpen) {
-            closeFavDropdown();
-        } else {
-            openFavDropdown();
-        }
+function initMap() {
+    map = new google.maps.Map(document.getElementById('map'), {
+        center: CONFIG.MAP_CENTER,
+        zoom: CONFIG.MAP_ZOOM,
+        styles: mapStyles(),
+        mapTypeControl: false,
+        streetViewControl: false,
     });
-
-    document.addEventListener('click', (e) => {
-        if (!e.target.closest('.fav-dropdown-wrapper')) {
-            closeFavDropdown();
-        }
-    });
+    infoWindow = new google.maps.InfoWindow();
 }
 
-function openFavDropdown() {
-    const dropdown = document.getElementById('favDropdown');
-    if (!dropdown) return;
-    renderFavDropdownList();
-    dropdown.classList.add('open');
-}
-
-function closeFavDropdown() {
-    const dropdown = document.getElementById('favDropdown');
-    if (dropdown) dropdown.classList.remove('open');
-}
-
-function renderFavDropdownList() {
-    const list = document.getElementById('favDropdownList');
-    if (!list) return;
-
-    if (sessionStorage.getItem('cafespot_guest') === 'true') {
-        list.innerHTML = '<p class="fav-dd-empty">Sign in to save favourites.</p>';
-        return;
-    }
-
-    if (favoritesData.length === 0) {
-        list.innerHTML = '<p class="fav-dd-empty">No saved cafes yet.<br>Tap ❤️ on a cafe to save it.</p>';
-        return;
-    }
-
-    list.innerHTML = favoritesData.map(fav => `
-        <div class="fav-dd-item" data-place-id="${fav.place_id}">
-            <div class="fav-dd-info">
-                <span class="fav-dd-name">${fav.name || 'Unknown'}</span>
-                <span class="fav-dd-addr">${fav.vicinity || ''}</span>
-                ${fav.rating ? `<span class="fav-dd-rating">★ ${fav.rating}</span>` : ''}
-            </div>
-            <button class="fav-dd-remove" data-place-id="${fav.place_id}" title="Remove">✕</button>
-        </div>
-    `).join('');
-
-    // Click on the item row → close dropdown and open detail modal
-    list.querySelectorAll('.fav-dd-item').forEach(item => {
-        item.addEventListener('click', (e) => {
-            // Don't trigger if the remove button was clicked
-            if (e.target.closest('.fav-dd-remove')) return;
-            const pid = item.dataset.placeId;
-            closeFavDropdown();
-            openDetailModal(pid);
-        });
-    });
-
-    // Click on remove button → remove from favourites
-    list.querySelectorAll('.fav-dd-remove').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            const pid = btn.dataset.placeId;
-            await toggleFavorite(pid, null);
-        });
-    });
-}
-
-// ── Load Favourites from API ──────────────────────────────────────────────────
-async function loadFavorites() {
-    try {
-        const data    = await API.getFavorites();
-        favoritesData = data.favorites || [];
-        favorites     = new Set(favoritesData.map(f => f.place_id));
-        updateFavCount();
-    } catch (e) {
-        console.error('Could not load favourites', e);
-    }
-}
-
-function updateFavCount() {
-    const badge = document.getElementById('favCount');
-    if (badge) badge.textContent = favorites.size > 0 ? favorites.size : '';
-}
-
-// ── Toggle Favourite ──────────────────────────────────────────────────────────
-async function toggleFavorite(place_id, cafeData) {
-    const isGuest = sessionStorage.getItem('cafespot_guest') === 'true';
-    if (isGuest || !Auth.isLoggedIn()) {
-        UI.toast('Sign in to save favourites', 'info');
-        return;
-    }
-
-    try {
-        if (favorites.has(place_id)) {
-            await API.removeFavorite(place_id);
-            favorites.delete(place_id);
-            favoritesData = favoritesData.filter(f => f.place_id !== place_id);
-            UI.toast('Removed from favourites', 'info');
-        } else {
-            if (!cafeData) {
-                cafeData = allCafes.find(c => c.place_id === place_id) || { place_id };
-            }
-            await API.addFavorite(cafeData);
-            favorites.add(place_id);
-            favoritesData.unshift(cafeData);
-            UI.toast('Added to favourites ❤️', 'success');
-        }
-        updateFavCount();
-        updateFavButtonsInGrid(place_id);
-        // If dropdown is open, re-render it
-        if (document.getElementById('favDropdown')?.classList.contains('open')) {
-            renderFavDropdownList();
-        }
-    } catch (err) {
-        UI.toast('Something went wrong', 'error');
-    }
-}
-
-function updateFavButtonsInGrid(place_id) {
-    document.querySelectorAll(`.fav-btn[data-place-id="${place_id}"]`).forEach(btn => {
-        btn.textContent = favorites.has(place_id) ? '❤️' : '🤍';
-        btn.title = favorites.has(place_id) ? 'Remove from favourites' : 'Add to favourites';
-    });
-}
-
-// ── Autocomplete ──────────────────────────────────────────────────────────────
-async function fetchAutocomplete(input) {
-    try {
-        const data        = await API.autocomplete(input);
-        const predictions = data.predictions || [];
-        const dropdown    = document.getElementById('autocompleteDropdown');
-        if (!dropdown) return;
-
-        if (predictions.length === 0) { hideAutocomplete(); return; }
-
-        dropdown.innerHTML = '';
-        predictions.forEach(p => {
-            const li = document.createElement('li');
-            li.textContent = p.description;
-            li.addEventListener('click', () => {
-                document.getElementById('suburbInput').value = p.description;
-                hideAutocomplete();
-                document.getElementById('searchForm').requestSubmit();
-            });
-            dropdown.appendChild(li);
-        });
-        dropdown.hidden = false;
-    } catch (e) { hideAutocomplete(); }
-}
-
-function hideAutocomplete() {
+function initAutocomplete() {
+    const input    = document.getElementById('suburbInput');
     const dropdown = document.getElementById('autocompleteDropdown');
-    if (dropdown) dropdown.hidden = true;
+    let debounceTimer;
+
+    input.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        const val = input.value.trim();
+        if (val.length < 2) { dropdown.innerHTML = ''; dropdown.hidden = true; return; }
+
+        debounceTimer = setTimeout(async () => {
+            try {
+                const data = await API.autocomplete(val);
+                dropdown.innerHTML = '';
+                (data.predictions || []).slice(0, 6).forEach(p => {
+                    const li = document.createElement('li');
+                    const suburb = p.description.replace(/, .*/, '');
+                    li.textContent = p.description;
+                    li.addEventListener('click', () => {
+                        input.value = suburb;
+                        dropdown.hidden = true;
+                    });
+                    dropdown.appendChild(li);
+                });
+                dropdown.hidden = dropdown.children.length === 0;
+            } catch {}
+        }, 300);
+    });
+
+    document.addEventListener('click', e => {
+        if (!e.target.closest('.search-box')) { dropdown.hidden = true; }
+    });
 }
 
-// ── Search ────────────────────────────────────────────────────────────────────
+function initFilters() {
+    ['filterOpen', 'filterRating', 'filterPrice'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', applyFilters);
+    });
+}
+
 async function handleSearch(e) {
     e.preventDefault();
-    const input   = document.getElementById('suburbInput').value.trim();
-    const searchBtn = document.getElementById('searchBtn');
-    if (!input) return;
-    hideAutocomplete();
+    const suburb = document.getElementById('suburbInput').value.trim();
+    if (!suburb) return;
 
-    searchBtn.disabled = true;
-    searchBtn.innerHTML = '<span class="spinner"></span> Searching...';
-    setResultsCount('');
-    clearMarkers();
+    const btn = document.getElementById('searchBtn');
+    UI.setLoading(btn, true);
+    document.getElementById('resultsGrid').innerHTML = '';
+    document.getElementById('resultsCount').textContent = '';
 
     try {
-        const geo = await API.geocode(input);
-        if (!geo.valid) {
-            UI.toast(geo.error || 'Suburb not found', 'error');
-            return;
-        }
+        const geo = await API.geocode(suburb);
+        if (!geo.valid) { UI.showToast(geo.error, 'error'); return; }
 
-        if (map) map.setCenter({ lat: geo.lat, lng: geo.lng });
+        originLat = geo.lat;
+        originLng = geo.lng;
 
-        const cafesData = await API.searchCafes(geo.lat, geo.lng);
-        let cafes       = cafesData.cafes || [];
+        map.setCenter({ lat: originLat, lng: originLng });
+        map.setZoom(14);
+        addOriginMarker(originLat, originLng, geo.formatted_address);
 
-        if (cafes.length === 0) {
-            setResultsCount('No cafes found nearby.');
-            document.getElementById('resultsGrid').innerHTML =
-                '<div class="empty-state"><div class="empty-icon">☕</div><p>No cafes found in this area.</p></div>';
-            return;
-        }
+        const cafeData = await API.searchCafes(originLat, originLng, CONFIG.DEFAULT_RADIUS);
+        if (!cafeData.cafes?.length) { UI.showToast('No cafes found in this area.', 'info'); return; }
 
-        // Get distances
-        const place_ids   = cafes.map(c => c.place_id);
-        const distData    = await API.getDistances(geo.lat, geo.lng, place_ids);
-        const distMap     = {};
-        (distData.distances || []).forEach(d => { distMap[d.place_id] = d; });
+        const placeIds = cafeData.cafes.map(c => c.place_id);
+        const distData = await API.getDistances(originLat, originLng, placeIds);
+        const distMap  = {};
+        distData.distances.forEach(d => distMap[d.place_id] = d);
 
-        cafes = cafes.map(c => ({
-            ...c,
-            distance_text:  distMap[c.place_id]?.distance_text  || null,
-            duration_text:  distMap[c.place_id]?.duration_text  || null,
-            distance_value: distMap[c.place_id]?.distance_value ?? 999999,
-        }));
+        currentCafes = cafeData.cafes.map(c => ({ ...c, ...distMap[c.place_id] }));
+        currentCafes.sort((a, b) => (a.distance_value || 999999) - (b.distance_value || 999999));
 
-        cafes.sort((a, b) => a.distance_value - b.distance_value);
-        allCafes = cafes;
+        applyFilters();
+        plotMarkers(currentCafes);
 
-        renderFilteredCafes();
-        placeMarkers(cafes);
     } catch (err) {
-        UI.toast('Search failed. Please try again.', 'error');
+        UI.showToast(err.message, 'error');
     } finally {
-        searchBtn.disabled = false;
-        searchBtn.innerHTML = 'Find Cafes';
+        UI.setLoading(btn, false, 'Find Cafes');
     }
 }
 
-// ── Filters ───────────────────────────────────────────────────────────────────
-function renderFilteredCafes() {
-    const openOnly  = document.getElementById('filterOpen')?.checked;
-    const minRating = parseFloat(document.getElementById('filterRating')?.value || '0');
-    const maxPrice  = parseInt(document.getElementById('filterPrice')?.value || '4', 10);
+function applyFilters() {
+    const onlyOpen    = document.getElementById('filterOpen')?.checked;
+    const minRating   = parseFloat(document.getElementById('filterRating')?.value || '0');
+    const maxPrice    = parseInt(document.getElementById('filterPrice')?.value || '4');
 
-    let cafes = allCafes.filter(c => {
-        if (openOnly  && c.open_now !== true) return false;
-        if (c.rating  && c.rating < minRating) return false;
-        if (c.price_level != null && c.price_level > maxPrice - 1) return false;
+    let filtered = currentCafes.filter(c => {
+        if (onlyOpen && c.open_now !== true) return false;
+        if (c.rating && c.rating < minRating) return false;
+        if (c.price_level != null && c.price_level > maxPrice) return false;
         return true;
     });
 
-    setResultsCount(cafes.length > 0 ? `${cafes.length} cafe${cafes.length !== 1 ? 's' : ''} found` : 'No cafes match filters');
-    renderCafes(cafes);
+    renderCafes(filtered);
 }
 
-function setResultsCount(text) {
-    const el = document.getElementById('resultsCount');
-    if (el) el.textContent = text;
-}
-
-// ── Render Cafes ──────────────────────────────────────────────────────────────
 function renderCafes(cafes) {
-    const grid = document.getElementById('resultsGrid');
-    if (!grid) return;
-    grid.innerHTML = '';
+    const grid  = document.getElementById('resultsGrid');
+    const count = document.getElementById('resultsCount');
 
-    if (cafes.length === 0) {
-        grid.innerHTML = '<div class="empty-state"><div class="empty-icon">☕</div><p>No cafes match your filters.</p></div>';
-        return;
-    }
+    count.textContent = `${cafes.length} cafe${cafes.length !== 1 ? 's' : ''} found`;
+    grid.innerHTML    = cafes.map((c, i) => UI.renderCafeCard(c, favoriteIds.has(c.place_id), i + 1)).join('');
 
-    cafes.forEach((cafe, i) => {
-        const isFav = favorites.has(cafe.place_id);
-        const card  = UI.renderCafeCard(cafe, i + 1, isFav);
+    grid.querySelectorAll('.cafe-card').forEach(card => {
+        card.addEventListener('click', e => {
+            if (e.target.closest('.fav-btn') || e.target.closest('.btn-details')) return;
+            const placeId = card.dataset.placeId;
+            const cafe    = currentCafes.find(c => c.place_id === placeId);
+            if (cafe) panToMarker(cafe);
+        });
+    });
 
-        card.querySelector('.fav-btn').addEventListener('click', (e) => {
+    grid.querySelectorAll('.fav-btn').forEach(btn => {
+        btn.addEventListener('click', e => {
             e.stopPropagation();
-            toggleFavorite(cafe.place_id, cafe);
+            toggleFavorite(btn.dataset.placeId);
         });
+    });
 
-        card.querySelector('.btn-details').addEventListener('click', (e) => {
+    grid.querySelectorAll('.btn-details').forEach(btn => {
+        btn.addEventListener('click', e => {
             e.stopPropagation();
-            openDetailModal(cafe.place_id);
+            const cafe = currentCafes.find(c => c.place_id === btn.dataset.placeId);
+            if (cafe) openDetailModal(cafe);
         });
-
-        card.addEventListener('click', () => {
-            if (map && cafe.lat && cafe.lng) {
-                map.setCenter({ lat: cafe.lat, lng: cafe.lng });
-                map.setZoom(16);
-                const markerIdx = allCafes.indexOf(cafe);
-                if (infoWindows[markerIdx]) {
-                    infoWindows.forEach(iw => iw.close());
-                    infoWindows[markerIdx].open(map, markers[markerIdx]);
-                }
-            }
-        });
-
-        grid.appendChild(card);
     });
 }
 
-// ── Map Markers ───────────────────────────────────────────────────────────────
-function placeMarkers(cafes) {
-    clearMarkers();
-    cafes.forEach((cafe, i) => {
-        if (!cafe.lat || !cafe.lng) return;
+function plotMarkers(cafes) {
+    markers.forEach(m => m.setMap(null));
+    markers = [];
 
+    cafes.forEach((cafe, i) => {
         const marker = new google.maps.Marker({
             position: { lat: cafe.lat, lng: cafe.lng },
             map,
-            label: { text: String(i + 1), color: '#fff', fontWeight: 'bold', fontSize: '12px' },
+            title: cafe.name,
+            label: { text: String(i + 1), color: '#fff', fontSize: '12px', fontWeight: 'bold' },
             icon: {
                 path: google.maps.SymbolPath.CIRCLE,
-                scale: 16,
                 fillColor: '#b5743a',
                 fillOpacity: 1,
                 strokeColor: '#fff',
                 strokeWeight: 2,
+                scale: 16,
             },
-            title: cafe.name,
-        });
-
-        const iw = new google.maps.InfoWindow({
-            content: `<strong>${cafe.name}</strong><br>${cafe.vicinity || ''}`
-                   + (cafe.rating ? `<br>★ ${cafe.rating}` : ''),
         });
 
         marker.addListener('click', () => {
-            infoWindows.forEach(w => w.close());
-            iw.open(map, marker);
+            infoWindow.setContent(`
+                <div style="font-family:sans-serif;max-width:200px">
+                    <strong>${cafe.name}</strong><br>
+                    <small>${cafe.vicinity || ''}</small><br>
+                    ${cafe.rating ? `★ ${cafe.rating}` : ''}
+                    ${cafe.distance_text ? ` · ${cafe.distance_text}` : ''}
+                </div>`);
+            infoWindow.open(map, marker);
+
+            const card = document.querySelector(`.cafe-card[data-place-id="${cafe.place_id}"]`);
+            if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         });
 
         markers.push(marker);
-        infoWindows.push(iw);
     });
 }
 
-function clearMarkers() {
-    markers.forEach(m => m.setMap(null));
-    markers      = [];
-    infoWindows  = [];
+function addOriginMarker(lat, lng, label) {
+    new google.maps.Marker({
+        position: { lat, lng },
+        map,
+        title: label,
+        icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            fillColor: '#2563eb',
+            fillOpacity: 1,
+            strokeColor: '#fff',
+            strokeWeight: 3,
+            scale: 10,
+        },
+        zIndex: 999,
+    });
 }
 
-// ── Detail Modal ──────────────────────────────────────────────────────────────
-async function openDetailModal(place_id) {
-    const container = document.getElementById('modalContainer');
-    container.hidden = false;
-    container.innerHTML = '<div class="modal-overlay"><div class="modal-box"><div class="modal-loading">Loading...</div></div></div>';
+function panToMarker(cafe) {
+    map.panTo({ lat: cafe.lat, lng: cafe.lng });
+    map.setZoom(16);
+    const marker = markers.find(m => m.getTitle() === cafe.name);
+    if (marker) google.maps.event.trigger(marker, 'click');
+}
+
+async function toggleFavorite(placeId) {
+    const cafe = currentCafes.find(c => c.place_id === placeId);
+    if (!cafe) return;
 
     try {
-        const details = await API.getDetails(place_id);
-        const isFav   = favorites.has(place_id);
-
-        // Look up cafe in search results first, then fall back to favourites data
-        const cafe = allCafes.find(c => c.place_id === place_id)
-                  || favoritesData.find(f => f.place_id === place_id)
-                  || null;
-
-        container.innerHTML = UI.renderDetailModal(details, place_id, isFav);
-
-        // Street View
-        if (details.geometry?.location) {
-            const { lat, lng } = details.geometry.location;
-            const svArea = document.getElementById('streetviewArea');
-            const svImg  = new Image();
-            svImg.className = 'streetview-img';
-            svImg.src = `${CONFIG.API_BASE}/api/streetview?lat=${lat}&lng=${lng}&width=600&height=200`;
-            svImg.onload  = () => { if (svArea) { svArea.innerHTML = ''; svArea.appendChild(svImg); } };
-            svImg.onerror = () => { if (svArea) svArea.style.display = 'none'; };
+        if (favoriteIds.has(placeId)) {
+            await API.removeFavorite(placeId);
+            favoriteIds.delete(placeId);
+            UI.showToast('Removed from favourites', 'info');
         } else {
-            const svArea = document.getElementById('streetviewArea');
-            if (svArea) svArea.style.display = 'none';
+            await API.addFavorite({ place_id: placeId, name: cafe.name, vicinity: cafe.vicinity, rating: cafe.rating, lat: cafe.lat, lng: cafe.lng });
+            favoriteIds.add(placeId);
+            UI.showToast(`${cafe.name} saved!`, 'success');
         }
-
-        // Close modal
-        document.getElementById('modalClose').addEventListener('click', closeModal);
-        container.querySelector('.modal-overlay').addEventListener('click', e => {
-            if (e.target === e.currentTarget) closeModal();
-        });
-        document.addEventListener('keydown', escClose);
-
-        // Fav button in modal
-        const favBtnModal = container.querySelector('.fav-btn-modal');
-        if (favBtnModal) {
-            favBtnModal.addEventListener('click', async () => {
-                await toggleFavorite(place_id, cafe);
-                favBtnModal.textContent = favorites.has(place_id) ? '❤️ Remove Favourite' : '🤍 Add to Favourites';
-            });
-        }
+        await loadFavorites();
+        applyFilters();
     } catch (err) {
-        container.innerHTML = '';
-        container.hidden = true;
-        UI.toast('Could not load cafe details', 'error');
+        UI.showToast(err.message, 'error');
     }
 }
 
-function closeModal() {
-    const container = document.getElementById('modalContainer');
-    container.innerHTML = '';
-    container.hidden = true;
-    document.removeEventListener('keydown', escClose);
+async function loadFavorites() {
+    try {
+        const data = await API.getFavorites();
+        favoriteIds = new Set((data.favorites || []).map(f => f.place_id));
+        renderFavList(data.favorites || []);
+    } catch {}
 }
 
-function escClose(e) {
-    if (e.key === 'Escape') closeModal();
+function renderFavList(favs) {
+    const list = document.getElementById('favList');
+    const count = document.getElementById('favCount');
+    count.textContent = favs.length || '';
+    if (!favs.length) {
+        list.innerHTML = '<p class="fav-empty">No saved cafes yet.</p>';
+        return;
+    }
+    list.innerHTML = favs.map(f => UI.renderFavoriteItem(f)).join('');
+    list.querySelectorAll('.fav-remove').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            await API.removeFavorite(btn.dataset.placeId);
+            favoriteIds.delete(btn.dataset.placeId);
+            await loadFavorites();
+            applyFilters();
+        });
+    });
+}
+
+function toggleFavPanel() {
+    document.getElementById('favPanel').classList.toggle('open');
+}
+
+async function openDetailModal(cafe) {
+    const overlay = document.getElementById('modalContainer');
+    overlay.innerHTML = '<div class="modal-overlay"><div class="modal-box modal-loading">Loading details...</div></div>';
+    overlay.hidden = false;
+    try {
+        const detail = await API.getDetails(cafe.place_id);
+        overlay.innerHTML = UI.renderDetailModal(detail, cafe);
+        document.getElementById('closeModal').addEventListener('click', () => { overlay.hidden = true; overlay.innerHTML = ''; });
+        overlay.addEventListener('click', e => { if (e.target === overlay.querySelector('.modal-overlay')) { overlay.hidden = true; overlay.innerHTML = ''; } });
+    } catch (err) {
+        overlay.innerHTML = '';
+        overlay.hidden = true;
+        UI.showToast('Could not load details', 'error');
+    }
+}
+
+function mapStyles() {
+    return [
+        { featureType: 'poi.business', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+        { featureType: 'transit', elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
+    ];
 }

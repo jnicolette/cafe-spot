@@ -1,48 +1,82 @@
-/* auth.js — JWT login / register / logout */
 const Auth = (() => {
-    const TOKEN_KEY    = 'cafespot_token';
-    const USERNAME_KEY = 'cafespot_username';
-    const EMAIL_KEY    = 'cafespot_email';
+    const TOKEN_KEY = 'cafespot_token';
+    const USER_KEY  = 'cafespot_user';
 
-    function getToken()    { return localStorage.getItem(TOKEN_KEY); }
-    function getUsername() { return localStorage.getItem(USERNAME_KEY); }
-    function getEmail()    { return localStorage.getItem(EMAIL_KEY); }
-    function isLoggedIn()  { return !!getToken(); }
+    function getToken() {
+        return localStorage.getItem(TOKEN_KEY);
+    }
 
-    function saveSession(data) {
-        localStorage.setItem(TOKEN_KEY,    data.token);
-        localStorage.setItem(USERNAME_KEY, data.username);
-        localStorage.setItem(EMAIL_KEY,    data.email);
+    function getUser() {
+        try {
+            return JSON.parse(localStorage.getItem(USER_KEY));
+        } catch {
+            return null;
+        }
+    }
+
+    function setSession(token, user) {
+        localStorage.setItem(TOKEN_KEY, token);
+        localStorage.setItem(USER_KEY, JSON.stringify(user));
     }
 
     function clearSession() {
         localStorage.removeItem(TOKEN_KEY);
-        localStorage.removeItem(USERNAME_KEY);
-        localStorage.removeItem(EMAIL_KEY);
-        sessionStorage.removeItem('cafespot_guest');
+        localStorage.removeItem(USER_KEY);
+    }
+
+    function isLoggedIn() {
+        return !!getToken();
+    }
+
+    function requireAuth() {
+        if (!isLoggedIn()) {
+            window.location.href = '/index.html';
+            return false;
+        }
+        return true;
+    }
+
+    function authHeaders() {
+        const token = getToken();
+        return token ? { 'Authorization': `Bearer ${token}` } : {};
+    }
+
+    async function safePost(url, body) {
+        let resp;
+        try {
+            resp = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+        } catch (networkErr) {
+            throw new Error('Cannot reach the server. Make sure Docker containers are running and you opened the app via http://localhost:8081 — not as a local file.');
+        }
+
+        let data;
+        try {
+            data = await resp.json();
+        } catch {
+            throw new Error(
+                resp.status === 502 || resp.status === 503
+                    ? 'Backend container is not responding. Run: docker compose up -d'
+                    : `Unexpected server response (${resp.status}). Check docker logs cafespot-backend.`
+            );
+        }
+
+        if (!resp.ok) throw new Error(data.error || `Request failed (${resp.status})`);
+        return data;
     }
 
     async function register(username, email, password) {
-        const res = await fetch(`${CONFIG.API_BASE}/api/auth/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, email, password }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Registration failed');
-        saveSession(data);
+        const data = await safePost(`${CONFIG.API_BASE}/auth/register`, { username, email, password });
+        setSession(data.token, { username: data.username, email: data.email });
         return data;
     }
 
     async function login(email, password) {
-        const res = await fetch(`${CONFIG.API_BASE}/api/auth/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Login failed');
-        saveSession(data);
+        const data = await safePost(`${CONFIG.API_BASE}/auth/login`, { email, password });
+        setSession(data.token, { username: data.username, email: data.email });
         return data;
     }
 
@@ -51,10 +85,5 @@ const Auth = (() => {
         window.location.href = '/index.html';
     }
 
-    function authHeaders() {
-        const token = getToken();
-        return token ? { 'Authorization': `Bearer ${token}` } : {};
-    }
-
-    return { register, login, logout, isLoggedIn, getToken, getUsername, getEmail, authHeaders };
+    return { getToken, getUser, isLoggedIn, requireAuth, authHeaders, register, login, logout };
 })();

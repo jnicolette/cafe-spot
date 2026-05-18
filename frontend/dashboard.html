@@ -15,25 +15,9 @@
             <span class="header-title">CafeSpot</span>
         </div>
         <div class="header-actions">
-
-            <!-- Favourites dropdown wrapper -->
-            <div class="fav-dropdown-wrapper">
-                <button class="fav-toggle-btn" id="favToggle">
-                    ❤️ Favourites <span class="fav-count-badge" id="favCount"></span>
-                </button>
-
-                <!-- Dropdown popup menu -->
-                <div class="fav-dropdown" id="favDropdown">
-                    <div class="fav-dd-header">
-                        <span>❤️ My Favourites</span>
-                        <button class="fav-dd-close" id="favDropdownClose">✕</button>
-                    </div>
-                    <div class="fav-dd-list" id="favDropdownList">
-                        <p class="fav-dd-empty">No saved cafes yet.<br>Tap ❤️ on a cafe to save it.</p>
-                    </div>
-                </div>
-            </div>
-
+            <button class="fav-toggle-btn" id="favToggle">
+                ❤️ Favourites <span class="fav-count-badge" id="favCount"></span>
+            </button>
             <div class="user-info">
                 <span class="user-avatar">👤</span>
                 <span id="userName"></span>
@@ -112,6 +96,18 @@
 
     </div>
 
+    <!-- Favourites slide-out panel -->
+    <div class="fav-panel" id="favPanel">
+        <div class="fav-header">
+            <h3>❤️ My Favourites</h3>
+            <button id="closeFavPanel" class="fav-close">✕</button>
+        </div>
+        <div id="favList" class="fav-list">
+            <p class="fav-empty">No saved cafes yet.</p>
+        </div>
+    </div>
+    <div class="fav-overlay" id="favOverlay"></div>
+
     <!-- Modal container -->
     <div id="modalContainer" hidden></div>
 
@@ -121,16 +117,21 @@
     <script src="js/ui.js"></script>
     <script src="js/app.js"></script>
     <script>
-        // Guard: redirect guests / unauthenticated users to login
+        // Allow guest access
         const isGuest = sessionStorage.getItem('cafespot_guest') === 'true';
         if (!isGuest && !Auth.isLoggedIn()) {
             window.location.href = '/index.html';
         }
-
-        // Close dropdown button
-        document.getElementById('favDropdownClose').addEventListener('click', (e) => {
-            e.stopPropagation();
-            document.getElementById('favDropdown').classList.remove('open');
+        document.getElementById('favOverlay').addEventListener('click', () => {
+            document.getElementById('favPanel').classList.remove('open');
+        });
+        document.getElementById('favToggle').addEventListener('click', () => {
+            document.getElementById('favPanel').classList.toggle('open');
+            document.getElementById('favOverlay').classList.toggle('show');
+        });
+        document.getElementById('closeFavPanel').addEventListener('click', () => {
+            document.getElementById('favPanel').classList.remove('open');
+            document.getElementById('favOverlay').classList.remove('show');
         });
     </script>
     <script
