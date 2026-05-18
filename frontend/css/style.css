@@ -99,7 +99,12 @@ a:hover { text-decoration: underline; }
     content: ''; flex: 1; height: 1px; background: var(--border);
 }
 
+.guest-section {
+    padding: 0 28px 24px;
+}
+
 .btn-guest {
+    width: 100%;
     padding: 11px; background: transparent; color: var(--muted);
     border: 1.5px solid var(--border); border-radius: 8px; font-size: 0.9rem;
     font-weight: 600; cursor: pointer; transition: border-color 0.2s, color 0.2s;
@@ -435,9 +440,20 @@ a:hover { text-decoration: underline; }
 .modal-photos { display: flex; gap: 4px; overflow: hidden; border-radius: var(--radius) var(--radius) 0 0; max-height: 220px; }
 .detail-photo { flex: 1; width: 0; height: 220px; object-fit: cover; }
 
-.modal-streetview { overflow: hidden; }
-.streetview-img   { width: 100%; height: 200px; object-fit: cover; display: block; }
-.no-streetview    { padding: 20px; text-align: center; color: var(--muted); background: var(--cream); }
+.modal-streetview {
+    overflow: hidden;
+    height: 220px;
+    background: var(--cream);
+    position: relative;
+}
+.modal-streetview.sv-hidden { display: none; }
+.sv-loading {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 0.88rem;
+    background: var(--cream);
+    pointer-events: none;
+}
 
 .modal-content { padding: 20px 24px 24px; }
 .modal-content h2 { font-size: 1.3rem; font-weight: 700; margin-bottom: 6px; }

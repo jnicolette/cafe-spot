@@ -36,12 +36,6 @@
                 </div>
                 <div class="form-error" id="loginError"></div>
                 <button type="submit" class="btn-auth" id="loginBtn">Sign In</button>
-                <div class="guest-divider">
-                    <span>or</span>
-                </div>
-                <button type="button" class="btn-guest" id="guestBtn">
-                    Continue as Guest
-                </button>
             </form>
 
             <!-- Register Form -->
@@ -71,6 +65,14 @@
                 <div class="form-error" id="registerError"></div>
                 <button type="submit" class="btn-auth" id="registerBtn">Create Account</button>
             </form>
+
+            <!-- Guest access — always visible on both tabs -->
+            <div class="guest-section">
+                <div class="guest-divider"><span>or</span></div>
+                <button type="button" class="btn-guest" id="guestBtn">
+                    Continue as Guest
+                </button>
+            </div>
         </div>
 
         <p class="auth-footer">Sydney cafes, sorted by distance from you.</p>
